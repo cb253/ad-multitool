@@ -9,8 +9,8 @@ SETTINGS_PATH = os.path.join(get_app_data_dir(), "settings.json")
 
 DEFAULTS = {
     "server": "",
-    "base_dn": "DC=example,DC=com",
-    "domain": "example.com",
+    "base_dn": "",
+    "domain": "",
     "use_ssl": True,
     "username": "",
 }

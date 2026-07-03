@@ -32,7 +32,9 @@ class LoginDialog(QDialog):
         self.server_edit.setText(settings["server"])
         self.server_edit.setPlaceholderText("dc01.example.com")
         self.base_dn_edit.setText(settings["base_dn"])
+        self.base_dn_edit.setPlaceholderText("DC=example,DC=com")
         self.domain_edit.setText(settings["domain"])
+        self.domain_edit.setPlaceholderText("example.com")
         self.username_edit.setText(settings["username"])
         self.username_edit.setPlaceholderText("jdoe")
 
