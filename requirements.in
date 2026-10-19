@@ -1,0 +1,4 @@
+# Runtime dependencies. Edit this file, then regenerate requirements.txt:
+#   .venv\Scripts\pip-compile --generate-hashes requirements.in
+PySide6==6.11.1
+ldap3==2.9.1

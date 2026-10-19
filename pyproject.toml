@@ -1,0 +1,23 @@
+[project]
+name = "ad-multitool"
+requires-python = ">=3.12"
+dynamic = ["version"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "S"]
+ignore = [
+    "S603",  # subprocess without shell is the intended, safe pattern here
+    "S607",  # ping/tracert/nslookup are resolved from the Windows system path on purpose
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]  # asserts and fixture passwords are fine in tests

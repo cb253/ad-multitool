@@ -1,0 +1,8 @@
+# Build and test tooling. Edit this file, then regenerate requirements-dev.txt:
+#   .venv\Scripts\pip-compile --generate-hashes requirements-dev.in
+-c requirements.txt
+-r requirements.in
+pyinstaller
+pytest
+ruff
+pip-audit
