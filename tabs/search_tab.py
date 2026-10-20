@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from audit_log import log_event
-from ui_common import format_dt, run_async
+from ui_common import format_dt, run_async, style_button
 
 USER_COLUMNS = ["Username", "Name", "Email", "Locked Out", "Disabled", "Last Logon"]
 
@@ -102,11 +102,11 @@ class SearchTab(QWidget):
         self.search_button.clicked.connect(self._search)
 
         self.unlock_button = QPushButton("Unlock Selected")
-        self.unlock_button.setObjectName("unlockButton")
+        style_button(self.unlock_button, "success")
         self.unlock_button.clicked.connect(self._unlock_selected)
 
         self.disable_button = QPushButton("Disable Selected")
-        self.disable_button.setObjectName("disableButton")
+        style_button(self.disable_button, "danger")
         self.disable_button.clicked.connect(self._disable_selected)
 
         self.progress_bar = QProgressBar()

@@ -13,10 +13,10 @@ from app_settings import load_settings, save_settings
 from ui_common import run_async
 
 
-def _connect(client, domain, username, password):
+def sign_in(sign_in_call, client, *args):
     """Bind on a worker thread, turning ldap3's errors into messages an operator can act on."""
     try:
-        client.connect(domain, username, password)
+        sign_in_call(*args)
     except LDAPBindError as exc:
         if "invalidCredentials" in str(exc):
             raise RuntimeError("Invalid username or password.") from exc
@@ -92,9 +92,11 @@ class LoginDialog(QDialog):
         self.server_edit.setText(server)
         self.status_label.setText(f"Connecting to {server}...")
         self._set_busy(True)
+        client = ADClient(server, base_dn)
         run_async(
-            _connect,
-            ADClient(server, base_dn),
+            sign_in,
+            client.connect,
+            client,
             domain,
             username,
             self.password_edit.text(),

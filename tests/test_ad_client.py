@@ -1,7 +1,7 @@
 import pytest
 from ldap3 import MOCK_SYNC, Connection, Server
 
-from ad_client import UAC_ACCOUNTDISABLE, UF_LOCKOUT, ADClient
+from ad_client import UAC_ACCOUNTDISABLE, UF_LOCKOUT, ADClient, SessionLockedError
 
 BASE_DN = "DC=test,DC=local"
 OPERATOR_DN = f"CN=Operator,{BASE_DN}"
@@ -144,3 +144,24 @@ def test_privileged_groups_matched_by_sid_not_name(client, monkeypatch):
     ]
     monkeypatch.setattr(client, "_effective_group_entries", lambda dn, attributes: entries)
     assert client.get_privileged_groups(JDOE_DN) == ["Administrators", "Renamed DA"]
+
+
+def test_operations_refused_after_close(client):
+    client.close()
+    assert client.is_connected is False
+    with pytest.raises(SessionLockedError):
+        client.search_users("jdoe")
+    with pytest.raises(SessionLockedError):
+        client.unlock_account(JDOE_DN)
+
+
+def test_reauthenticate_rejects_a_different_identity(client, monkeypatch):
+    def connect_as_someone_else(domain, username, password):
+        client._conn = object()
+        client.bound_identity = r"TEST\someoneelse"
+
+    monkeypatch.setattr(client, "connect", connect_as_someone_else)
+    monkeypatch.setattr(client, "close", lambda: setattr(client, "_conn", None))
+    with pytest.raises(RuntimeError, match="expected TEST"):
+        client.reauthenticate("pw")
+    assert client.is_connected is False

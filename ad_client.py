@@ -285,6 +285,10 @@ class ADComputer:
         )
 
 
+class SessionLockedError(RuntimeError):
+    """Raised when an operation is attempted while signed out (e.g. during a session lock)."""
+
+
 @dataclass
 class SearchResult:
     items: list
@@ -313,6 +317,7 @@ class ADClient:
         )
         self._conn = None
         self._lock = threading.RLock()
+        self.domain = None
         self.username = None
         self.bound_identity = None
 
@@ -336,10 +341,24 @@ class ADClient:
                 receive_timeout=RECEIVE_TIMEOUT_SECONDS,
                 auto_bind=True,
             )
+            self.domain = domain
             self.username = username
             # "u:DOMAIN\\user" as the DC sees it, the identity actually used for writes.
             identity = self._conn.extend.standard.who_am_i() or ""
             self.bound_identity = identity[2:] if identity.startswith("u:") else identity or username
+
+    def reauthenticate(self, password):
+        """Bind again as the same user after a session lock."""
+        expected_identity = self.bound_identity
+        self.connect(self.domain, self.username, password)
+        if expected_identity and self.bound_identity.lower() != expected_identity.lower():
+            # Should not happen with an unchanged username, but never resume someone else's session.
+            self.close()
+            raise RuntimeError(f"Signed in as {self.bound_identity}, expected {expected_identity}.")
+
+    @property
+    def is_connected(self):
+        return self._conn is not None
 
     @property
     def bound_sam_account_name(self):
@@ -347,6 +366,7 @@ class ADClient:
         return identity.rsplit("\\", 1)[-1].split("@", 1)[0]
 
     def close(self):
+        """Unbind and drop the connection, which also discards the password ldap3 keeps for rebinding."""
         with self._lock:
             if self._conn:
                 self._conn.unbind()
@@ -363,6 +383,8 @@ class ADClient:
     def _run(self, operation):
         """Run one ldap3 call under the lock, rebinding once if the DC dropped the connection."""
         with self._lock:
+            if self._conn is None:
+                raise SessionLockedError("Not signed in. Unlock the session and try again.")
             try:
                 return operation()
             except LDAPCommunicationError:

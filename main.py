@@ -25,20 +25,21 @@ QTableView::item:selected, QListView::item:selected {
     color: palette(highlighted-text);
 }
 
-/* Windows 11 accent-family colors, so the action buttons sit alongside the selection blue. */
-QPushButton#unlockButton, QPushButton#disableButton {
+/* Windows 11 accent-family colors, so the action buttons sit alongside the selection blue.
+   Applied by role (see ui_common.style_button), not per button. */
+QPushButton[role="success"], QPushButton[role="danger"] {
     color: white;
     border: none;
     border-radius: 4px;
-    padding: 6px;
+    padding: 6px 16px;
 }
-QPushButton#unlockButton { background-color: #107C10; }
-QPushButton#unlockButton:hover { background-color: #138A13; }
-QPushButton#unlockButton:pressed { background-color: #0B5A0B; }
-QPushButton#disableButton { background-color: #C42B1C; }
-QPushButton#disableButton:hover { background-color: #D13A2B; }
-QPushButton#disableButton:pressed { background-color: #9A2216; }
-QPushButton#unlockButton:disabled, QPushButton#disableButton:disabled {
+QPushButton[role="success"] { background-color: #107C10; }
+QPushButton[role="success"]:hover { background-color: #138A13; }
+QPushButton[role="success"]:pressed { background-color: #0B5A0B; }
+QPushButton[role="danger"] { background-color: #C42B1C; }
+QPushButton[role="danger"]:hover { background-color: #D13A2B; }
+QPushButton[role="danger"]:pressed { background-color: #9A2216; }
+QPushButton[role="success"]:disabled, QPushButton[role="danger"]:disabled {
     background-color: #3A3A3A;
     color: #8A8A8A;
 }

@@ -20,6 +20,11 @@ def format_dt(value, never="Never"):
     return value.strftime("%Y-%m-%d %H:%M") if value else never
 
 
+def style_button(button, role):
+    """Color a button via the app stylesheet. role is "success" (green) or "danger" (red)."""
+    button.setProperty("role", role)
+
+
 class AsyncWorker(QThread):
     """Runs a single blocking call off the UI thread. Accepts any return type."""
 

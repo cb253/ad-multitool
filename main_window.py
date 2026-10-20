@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QMainWindow, QTabWidget
 
+from session_lock import SessionLock
 from tabs import CompareGroupsTab, CompareUsersTab, ComputersTab, NetworkingTab, SearchTab
 from ui_common import wait_for_workers
 from version import APP_NAME, __version__
@@ -21,6 +22,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(CompareGroupsTab(client), "Compare Groups")
         tabs.addTab(self.networking_tab, "Networking")
         self.setCentralWidget(tabs)
+
+        self.session_lock = SessionLock(self, client)
+        self.session_lock.start()
 
     def closeEvent(self, event):
         self.networking_tab.stop_running_command()
