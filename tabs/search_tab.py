@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from audit_log import log_event
+from tabs.lockout_dialog import LockoutHistoryDialog
 from ui_common import format_dt, run_async, style_button
 
 USER_COLUMNS = ["Username", "Name", "Email", "Locked Out", "Disabled", "Last Logon"]
@@ -136,9 +137,17 @@ class SearchTab(QWidget):
         self.groups_list.setShowGrid(False)
         self.groups_list.setEditTriggers(QTableWidget.NoEditTriggers)
 
+        self.lockout_button = QPushButton("Lockout History")
+        self.lockout_button.setToolTip("Bad password counts per domain controller and lockout events from the PDC")
+        self.lockout_button.setEnabled(False)
+        self.lockout_button.clicked.connect(self._show_lockout_history)
+
         details_box = QGroupBox("Account Details")
         details_layout = QHBoxLayout(details_box)
-        details_layout.addWidget(self.details_label, stretch=1)
+        details_column = QVBoxLayout()
+        details_column.addWidget(self.details_label, stretch=1)
+        details_column.addWidget(self.lockout_button, alignment=Qt.AlignLeft)
+        details_layout.addLayout(details_column, stretch=1)
         groups_column = QVBoxLayout()
         groups_column.addWidget(QLabel("Group Memberships"))
         groups_column.addWidget(self.groups_list)
@@ -213,6 +222,7 @@ class SearchTab(QWidget):
         # Any group lookup still in flight is now stale; its result is ignored when it lands.
         self._groups_request += 1
         users = self._selected_users()
+        self.lockout_button.setEnabled(len(users) == 1)
         if not users:
             self.details_label.setText("Select an account to view details.")
             self.groups_list.setRowCount(0)
@@ -269,6 +279,14 @@ class SearchTab(QWidget):
             item = QTableWidgetItem(name)
             item.setToolTip(description or "No description")
             self.groups_list.setItem(index % rows_needed, index // rows_needed, item)
+
+    def _show_lockout_history(self):
+        users = self._selected_users()
+        if len(users) != 1:
+            return
+        # Parented to the main window so the session lock hides it along with everything else.
+        dialog = LockoutHistoryDialog(self.client, users[0], parent=self.window())
+        dialog.show()
 
     def _unlock_selected(self):
         users = self._selected_users()

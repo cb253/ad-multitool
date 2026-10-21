@@ -178,4 +178,4 @@ class CompareTab(QWidget):
             return
         QApplication.clipboard().setText(self._comparison.as_text())
         self.copy_button.setText("Copied!")
-        QTimer.singleShot(COPY_CONFIRM_MS, lambda: self.copy_button.setText("Copy Results"))
+        QTimer.singleShot(COPY_CONFIRM_MS, self, lambda: self.copy_button.setText("Copy Results"))

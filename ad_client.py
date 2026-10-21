@@ -3,6 +3,7 @@
 import logging
 import ssl
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +11,8 @@ from ldap3 import BASE, MODIFY_REPLACE, SIMPLE, SUBTREE, Connection, Server, Tls
 from ldap3.core.exceptions import LDAPCommunicationError
 from ldap3.protocol.formatters.formatters import format_sid
 from ldap3.utils.conv import escape_filter_chars
+
+from lockout_events import EventLogCredentials
 
 _logger = logging.getLogger(__name__)
 
@@ -64,6 +67,8 @@ COMPUTER_ATTRIBUTES = [
 
 # userAccountControl bit for a disabled account
 UAC_ACCOUNTDISABLE = 0x2
+# userAccountControl bit set on domain controller computer accounts
+UAC_SERVER_TRUST_ACCOUNT = 0x2000
 # msDS-User-Account-Control-Computed bit for an account that is locked out right now.
 # Unlike lockoutTime, AD clears this once the lockout duration has passed.
 UF_LOCKOUT = 0x10
@@ -76,6 +81,8 @@ PRIVILEGED_GROUP_SIDS = {"S-1-5-32-544": "Administrators"}
 # AD-specific LDAP matching rule that walks nested group membership
 # transitively, instead of only the immediate member/memberOf attribute.
 LDAP_MATCHING_RULE_IN_CHAIN = "1.2.840.113556.1.4.1941"
+# Matching rule for "attribute has all of these bits set".
+LDAP_MATCHING_RULE_BIT_AND = "1.2.840.113556.1.4.803"
 
 # LDAP result code for a truncated result set (server-side size limit hit).
 LDAP_SIZE_LIMIT_EXCEEDED = 4
@@ -285,6 +292,85 @@ class ADComputer:
         )
 
 
+def _make_server(host):
+    """LDAPS server definition with certificate and hostname validation against the Windows trust store."""
+    return Server(
+        host,
+        port=LDAPS_PORT,
+        use_ssl=True,
+        tls=Tls(validate=ssl.CERT_REQUIRED, sni=host),
+        get_info=None,
+        connect_timeout=CONNECT_TIMEOUT_SECONDS,
+    )
+
+
+def ad_interval_to_timedelta(value):
+    """AD stores policy durations as negative counts of 100 ns intervals."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, timedelta):
+        return abs(value)
+    ivalue = int(value)
+    if ivalue in (0, -0x8000000000000000):  # 0 or "never" (until an admin unlocks)
+        return None
+    return timedelta(microseconds=abs(ivalue) / 10)
+
+
+@dataclass
+class LockoutPolicy:
+    threshold: int
+    duration: timedelta  # None means locked until an admin unlocks
+    observation_window: timedelta
+
+
+@dataclass
+class DcLockoutStatus:
+    dc: str
+    bad_password_count: int = None
+    last_bad_password: datetime = None
+    last_logon: datetime = None
+    lockout_time: datetime = None
+    error: str = ""
+
+
+DC_LOCKOUT_ATTRIBUTES = ["badPwdCount", "badPasswordTime", "lastLogon", "lockoutTime"]
+
+
+def _read_dc_lockout_status(dc, user, password, user_dn):
+    """One DC's view of an account, over its own validated LDAPS connection."""
+    conn = Connection(
+        _make_server(dc),
+        user=user,
+        password=password,
+        authentication=SIMPLE,
+        receive_timeout=RECEIVE_TIMEOUT_SECONDS,
+    )
+    try:
+        conn.bind()
+        if not conn.bound:
+            return DcLockoutStatus(dc, error=conn.result.get("description") or "bind failed")
+        conn.search(user_dn, "(objectClass=user)", search_scope=BASE, attributes=DC_LOCKOUT_ATTRIBUTES)
+        if not conn.entries:
+            return DcLockoutStatus(dc, error="account not found on this DC")
+        entry = conn.entries[0]
+        count = _value(entry, "badPwdCount")
+        return DcLockoutStatus(
+            dc,
+            bad_password_count=int(count) if count not in (None, "") else None,
+            last_bad_password=filetime_to_datetime(_value(entry, "badPasswordTime")),
+            last_logon=filetime_to_datetime(_value(entry, "lastLogon")),
+            lockout_time=filetime_to_datetime(_value(entry, "lockoutTime")),
+        )
+    except Exception as exc:
+        _logger.warning("Lockout status read from %s failed", dc, exc_info=True)
+        return DcLockoutStatus(dc, error=str(exc).splitlines()[0][:200])
+    finally:
+        try:
+            conn.unbind()
+        except Exception:
+            _logger.debug("Ignoring error closing connection to %s", dc, exc_info=True)
+
+
 class SessionLockedError(RuntimeError):
     """Raised when an operation is attempted while signed out (e.g. during a session lock)."""
 
@@ -306,15 +392,7 @@ class ADClient:
     def __init__(self, server, base_dn):
         self.base_dn = base_dn
         self.server_name = server
-        tls = Tls(validate=ssl.CERT_REQUIRED, sni=server)
-        self._server = Server(
-            server,
-            port=LDAPS_PORT,
-            use_ssl=True,
-            tls=tls,
-            get_info=None,
-            connect_timeout=CONNECT_TIMEOUT_SECONDS,
-        )
+        self._server = _make_server(server)
         self._conn = None
         self._lock = threading.RLock()
         self.domain = None
@@ -493,6 +571,68 @@ class ADClient:
         if user.admin_count:
             return "protected admin account (adminCount=1)"
         return None
+
+    def get_lockout_policy(self):
+        attributes = ["lockoutThreshold", "lockoutDuration", "lockOutObservationWindow"]
+        entries, _ = self._search(self.base_dn, "(objectClass=domain)", attributes, scope=BASE)
+        if not entries:
+            return None
+        entry = entries[0]
+        return LockoutPolicy(
+            threshold=int(_value(entry, "lockoutThreshold") or 0),
+            duration=ad_interval_to_timedelta(_value(entry, "lockoutDuration")),
+            observation_window=ad_interval_to_timedelta(_value(entry, "lockOutObservationWindow")),
+        )
+
+    def get_domain_controllers(self):
+        """DNS names of every domain controller (SERVER_TRUST_ACCOUNT computers)."""
+        filter_str = (
+            f"(&(objectCategory=computer)(userAccountControl:{LDAP_MATCHING_RULE_BIT_AND}:={UAC_SERVER_TRUST_ACCOUNT}))"
+        )
+        entries, _ = self._search(self.base_dn, filter_str, ["dNSHostName"])
+        return sorted(
+            (str(_value(entry, "dNSHostName")) for entry in entries if _value(entry, "dNSHostName")), key=str.lower
+        )
+
+    def get_pdc_hostname(self):
+        """DNS name of the PDC emulator, where every lockout in the domain is recorded."""
+        entries, _ = self._search(self.base_dn, "(objectClass=domain)", ["fSMORoleOwner"], scope=BASE)
+        ntds_settings_dn = str(_value(entries[0], "fSMORoleOwner") or "") if entries else ""
+        if not ntds_settings_dn:
+            return ""
+        server_dn = container_from_dn(ntds_settings_dn)
+        entries, _ = self._search(server_dn, "(objectClass=server)", ["dNSHostName"], scope=BASE)
+        return str(_value(entries[0], "dNSHostName") or "") if entries else ""
+
+    def event_log_credentials(self):
+        """The signed-in account's credentials, for reading DC event logs as that same account."""
+        with self._lock:
+            if self._conn is None:
+                raise SessionLockedError("Not signed in. Unlock the session and try again.")
+            identity = self.bound_identity or ""
+            if "\\" in identity:
+                domain, user = identity.split("\\", 1)
+            else:
+                # No DOMAIN\user from the DC. The UPN bind name works on its own with no domain.
+                domain, user = "", self._conn.user
+            return EventLogCredentials(domain=domain, user=user, password=self._conn.password)
+
+    def get_lockout_status_per_dc(self, user_dn, domain_controllers=None):
+        """Read the non-replicated lockout attributes for one account from every DC, in parallel.
+
+        badPwdCount, badPasswordTime, and lastLogon are tracked separately on each DC, so the DC
+        with the most recent bad password usually points at where the bad attempts came from.
+        """
+        with self._lock:
+            if self._conn is None:
+                raise SessionLockedError("Not signed in. Unlock the session and try again.")
+            user, password = self._conn.user, self._conn.password
+        if domain_controllers is None:
+            domain_controllers = self.get_domain_controllers()
+        if not domain_controllers:
+            return []
+        with ThreadPoolExecutor(max_workers=min(8, len(domain_controllers))) as pool:
+            return list(pool.map(lambda dc: _read_dc_lockout_status(dc, user, password, user_dn), domain_controllers))
 
     def unlock_account(self, distinguished_name):
         self._modify(distinguished_name, {"lockoutTime": [(MODIFY_REPLACE, [0])]})

@@ -132,6 +132,13 @@ class SessionLock(QObject):
         _logger.info("Locking session for %s after inactivity", self.client.bound_identity)
         self.client.close()
         was_maximized = self.window.isMaximized()
+        # Hide every other window too (lockout history, open prompts). Hiding a modal prompt
+        # cancels it, so a confirmation left open cannot be accepted after the lock.
+        other_windows = [
+            widget for widget in QApplication.topLevelWidgets() if widget is not self.window and widget.isVisible()
+        ]
+        for widget in other_windows:
+            widget.hide()
         self.window.hide()
 
         dialog = UnlockDialog(self.client)
@@ -149,4 +156,7 @@ class SessionLock(QObject):
             self.window.showMaximized()
         else:
             self.window.show()
+        for widget in other_windows:
+            if not widget.isModal():
+                widget.show()
         self.watcher.start()

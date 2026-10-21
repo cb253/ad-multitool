@@ -6,7 +6,7 @@ Initial version built July 2026.
 
 ## What it does
 
-- **Search & Unlock**: search for user accounts by username, name, or email (`*` wildcards supported), view full account details (title, department, description, creation date, password last set, account expiration, nested group membership), and unlock or disable accounts, each with a confirmation prompt.
+- **Search & Unlock**: search for user accounts by username, name, or email (`*` wildcards supported), view full account details (title, department, description, creation date, password last set, account expiration, nested group membership), and unlock or disable accounts, each with a confirmation prompt. **Lockout History** shows the domain lockout policy, each domain controller's bad password count and last bad password time, and lockout and unlock events from the PDC emulator, including the computer the bad passwords came from.
 - **Computers**: search for computer accounts by name or DNS hostname, and view operating system, description, and last logon.
 - **Compare Users**: compare two user accounts' group memberships side by side, shared groups highlighted in green, differing groups in red.
 - **Compare Groups**: compare two AD groups (including nested membership) and see which users are shared vs. unique to each.
@@ -67,3 +67,8 @@ Settings, the audit log, and the application error log (`app.log`) are stored pe
 - **Disable guardrails.** The tool refuses to disable the signed-in account, the built-in Administrator and krbtgt accounts, members of Domain Admins, Schema Admins, Enterprise Admins, or Administrators (matched by SID, so renamed groups are still caught), and any account with `adminCount=1`. Use ADUC when one of these is intentional.
 - **Audit.** The local audit log is a convenience record in the operator's own profile and can be edited by them. The authoritative record is the domain controllers' Security log. Event 4767 records unlocks and event 4725 records disables, with the operator's account as the subject.
 - **Distribution.** Run the exe from a share that operators can read but not write, so the exe cannot be replaced. Sign release builds (see above).
+- **Lockout events.** Lockout (4740) and unlock (4767) events are read from the PDC emulator's Security log through the Windows Event Log API, as the **account signed in to the tool** (not the Windows logon). The credentials are passed to the API in-process and never appear on a command line. To allow it, a domain admin:
+  1. Adds the operator's tool sign-in account to the built-in **Event Log Readers** group (Builtin container in ADUC).
+  2. Enables the **Remote Event Log Management** inbound firewall rules on the domain controllers, ideally through the Default Domain Controllers GPO.
+
+  Without this, the Lockout History window still shows per-DC status and explains what is missing. History only goes back as far as the PDC keeps its Security log, and the window shows the oldest retained event. For longer history, raise the Security log size on the DCs or forward events to a SIEM.
