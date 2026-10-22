@@ -21,3 +21,4 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S105", "S106"]  # asserts and fixture passwords are fine in tests
+"user_guide.py" = ["E501"]  # markdown paragraphs are kept on one line each

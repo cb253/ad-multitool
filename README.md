@@ -14,6 +14,7 @@ Initial version built July 2026.
 - **Networking**: run ping, continuous ping, traceroute, nslookup, or a TCP port test against an IP address or computer name, with live output and a Stop button.
 - Local audit log of every account unlock and disable, including failed and refused attempts (who, what, when, outcome).
 - Non-secret connection settings (server, base DN, domain, username) are remembered between launches. Passwords are never stored.
+- **Help > User Guide** (F1) explains each feature inside the app. Its content lives in `user_guide.py`. Update it when features change.
 
 ## Requirements
 
@@ -58,7 +59,7 @@ Dependencies are pinned with hashes. To change one, edit `requirements.in` or `r
 
 ## Data storage
 
-Settings, the audit log, and the application error log (`app.log`) are stored per-user in `%APPDATA%\AD-Multitool\`, not in the application folder. This keeps the tool working correctly even when run from a shared, read-only network location.
+Settings, the audit log, and the application error log (`app.log`) are stored per-user in `%APPDATA%\AD-Multitool\`, not in the application folder. This keeps the tool working correctly even when run from a shared, read-only network location. To open the folder from the app, use **Help > Open Logs Folder**.
 
 ## Security
 
