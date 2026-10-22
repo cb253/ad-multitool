@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import QMainWindow, QTabWidget
 
 from session_lock import SessionLock
-from tabs import CompareGroupsTab, CompareUsersTab, ComputersTab, NetworkingTab, SearchTab
+from tabs import CompareGroupsTab, CompareUsersTab, NetworkingTab, SearchTab
 from ui_common import wait_for_workers
 from version import APP_NAME, __version__
 
@@ -16,8 +16,7 @@ class MainWindow(QMainWindow):
         self.networking_tab = NetworkingTab()
 
         tabs = QTabWidget()
-        tabs.addTab(SearchTab(client), "Search && Unlock")
-        tabs.addTab(ComputersTab(client), "Computers")
+        tabs.addTab(SearchTab(client), "Search")
         tabs.addTab(CompareUsersTab(client), "Compare Users")
         tabs.addTab(CompareGroupsTab(client), "Compare Groups")
         tabs.addTab(self.networking_tab, "Networking")

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -18,12 +19,77 @@ from audit_log import log_event
 from tabs.lockout_dialog import LockoutHistoryDialog
 from ui_common import format_dt, run_async, style_button
 
-USER_COLUMNS = ["Username", "Name", "Email", "Locked Out", "Disabled", "Last Logon"]
+RESULT_COLUMNS = ["Type", "Name", "Account / Host", "Email / OS", "Locked Out", "Disabled", "Last Logon"]
+USER, COMPUTER = "user", "computer"
 
 TRUNCATED_MESSAGE = (
     "The directory server stopped returning results before the search finished. "
     "Narrow your search term to see the full set of matches."
 )
+
+
+def _search_directory(client, term):
+    """Users and computers matching one query. Runs on a worker thread."""
+    return client.search_users(term), client.search_computers(term)
+
+
+def _user_details(user):
+    return [
+        f"{user.common_name} ({user.sam_account_name})",
+        f"UPN: {user.user_principal_name or 'N/A'}",
+        f"Email: {user.email or 'N/A'}",
+        f"Title: {user.title or 'N/A'}",
+        f"Department: {user.department or 'N/A'}",
+        f"Office: {user.office or 'N/A'}",
+        f"Phone: {user.phone or 'N/A'}",
+        f"Manager: {user.manager_name or 'N/A'}",
+        f"Description: {user.description or 'N/A'}",
+        f"Organizational Unit: {user.organizational_unit or 'N/A'}",
+        f"Created: {format_dt(user.when_created, never='Unknown')}",
+        f"Last Modified: {format_dt(user.when_changed, never='Unknown')}",
+        f"Password Last Set: {format_dt(user.password_last_set, never='Never (must change at next logon)')}",
+        f"Account Expires: {format_dt(user.account_expires)}",
+        f"Last Logon (approx., replication delay up to 14 days): {format_dt(user.last_logon)}",
+        f"Locked Out: {'Yes, at ' + format_dt(user.locked_out_at) if user.is_locked_out else 'No'}",
+        f"Disabled: {'Yes' if user.disabled else 'No'}",
+    ]
+
+
+def _computer_details(computer):
+    return [
+        f"{computer.common_name} ({computer.sam_account_name})",
+        f"DNS Hostname: {computer.dns_hostname or 'N/A'}",
+        f"Operating System: {computer.operating_system or 'N/A'}",
+        f"OS Version: {computer.operating_system_version or 'N/A'}",
+        f"Description: {computer.description or 'N/A'}",
+        f"Organizational Unit: {computer.organizational_unit or 'N/A'}",
+        f"Created: {format_dt(computer.when_created, never='Unknown')}",
+        f"Last Modified: {format_dt(computer.when_changed, never='Unknown')}",
+        f"Last Logon (approx., replication delay up to 14 days): {format_dt(computer.last_logon)}",
+        f"Disabled: {'Yes' if computer.disabled else 'No'}",
+    ]
+
+
+def _result_row(kind, item):
+    if kind == USER:
+        return [
+            "User",
+            item.common_name,
+            item.sam_account_name,
+            item.email,
+            "Yes" if item.is_locked_out else "No",
+            "Yes" if item.disabled else "No",
+            format_dt(item.last_logon),
+        ]
+    return [
+        "Computer",
+        item.common_name,
+        item.dns_hostname,
+        item.operating_system,
+        "",
+        "Yes" if item.disabled else "No",
+        format_dt(item.last_logon),
+    ]
 
 
 def _unlock_users(client, users):
@@ -89,14 +155,19 @@ def _summarize(results, verb):
 
 
 class SearchTab(QWidget):
+    """One search for users and computers. The details panel follows the selected row's type."""
+
+    PAGE_MESSAGE, PAGE_USER, PAGE_COMPUTER = 0, 1, 2
+
     def __init__(self, client):
         super().__init__()
         self.client = client
-        self._results = []
+        self._results = []  # [(USER | COMPUTER, ADUser | ADComputer)]
         self._groups_request = 0
+        self._empty_message = "Search for a user or computer, then select a result to view details."
 
         self.query_edit = QLineEdit()
-        self.query_edit.setPlaceholderText("Search by username, name, or email")
+        self.query_edit.setPlaceholderText("Search users and computers by name, username, email, or hostname")
         self.query_edit.returnPressed.connect(self._search)
 
         self.search_button = QPushButton("Search")
@@ -114,19 +185,25 @@ class SearchTab(QWidget):
         self.progress_bar.setRange(0, 0)  # indeterminate
         self.progress_bar.setVisible(False)
 
-        self.table = QTableWidget(0, len(USER_COLUMNS))
-        self.table.setHorizontalHeaderLabels(USER_COLUMNS)
+        self.table = QTableWidget(0, len(RESULT_COLUMNS))
+        self.table.setHorizontalHeaderLabels(RESULT_COLUMNS)
         header = self.table.horizontalHeader()
-        for col in range(len(USER_COLUMNS)):
+        for col in range(len(RESULT_COLUMNS)):
             header.setSectionResizeMode(
                 col,
-                QHeaderView.Stretch if USER_COLUMNS[col] == "Email" else QHeaderView.ResizeToContents,
+                QHeaderView.Stretch if RESULT_COLUMNS[col] == "Email / OS" else QHeaderView.ResizeToContents,
             )
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.itemSelectionChanged.connect(self._update_details)
 
-        self.details_label = QLabel("Select an account to view details.")
+        # Page 0: prompt or multi-selection message.
+        self.message_label = QLabel()
+        self.message_label.setWordWrap(True)
+        self.message_label.setAlignment(Qt.AlignTop)
+
+        # Page 1: user details, groups, lockout history.
+        self.details_label = QLabel()
         self.details_label.setWordWrap(True)
         self.details_label.setAlignment(Qt.AlignTop)
 
@@ -139,33 +216,53 @@ class SearchTab(QWidget):
 
         self.lockout_button = QPushButton("Lockout History")
         self.lockout_button.setToolTip("Bad password counts per domain controller and lockout events from the PDC")
-        self.lockout_button.setEnabled(False)
         self.lockout_button.clicked.connect(self._show_lockout_history)
 
-        details_box = QGroupBox("Account Details")
-        details_layout = QHBoxLayout(details_box)
+        user_page = QWidget()
+        user_layout = QHBoxLayout(user_page)
+        user_layout.setContentsMargins(0, 0, 0, 0)
         details_column = QVBoxLayout()
         details_column.addWidget(self.details_label, stretch=1)
         details_column.addWidget(self.lockout_button, alignment=Qt.AlignLeft)
-        details_layout.addLayout(details_column, stretch=1)
+        user_layout.addLayout(details_column, stretch=1)
         groups_column = QVBoxLayout()
         groups_column.addWidget(QLabel("Group Memberships"))
         groups_column.addWidget(self.groups_list)
-        details_layout.addLayout(groups_column, stretch=2)
+        user_layout.addLayout(groups_column, stretch=2)
+
+        # Page 2: computer details.
+        self.computer_label = QLabel()
+        self.computer_label.setWordWrap(True)
+        self.computer_label.setAlignment(Qt.AlignTop)
+
+        self.details_stack = QStackedWidget()
+        self.details_stack.addWidget(self.message_label)
+        self.details_stack.addWidget(user_page)
+        self.details_stack.addWidget(self.computer_label)
+
+        self.details_box = QGroupBox("Details")
+        details_box_layout = QVBoxLayout(self.details_box)
+        details_box_layout.addWidget(self.details_stack)
 
         search_row = QHBoxLayout()
         search_row.addWidget(self.query_edit)
         search_row.addWidget(self.search_button)
 
+        # Account actions only apply to users, so the whole row hides when none are selected.
+        self.actions_row = QWidget()
+        actions_layout = QHBoxLayout(self.actions_row)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.addWidget(self.unlock_button)
+        actions_layout.addWidget(self.disable_button)
+
         layout = QVBoxLayout(self)
         layout.addLayout(search_row)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.table)
-        layout.addWidget(details_box)
-        actions_row = QHBoxLayout()
-        actions_row.addWidget(self.unlock_button)
-        actions_row.addWidget(self.disable_button)
-        layout.addLayout(actions_row)
+        layout.addWidget(self.details_box)
+        layout.addWidget(self.actions_row)
+
+        self._update_details()
 
     def _search(self):
         term = self.query_edit.text().strip()
@@ -173,7 +270,8 @@ class SearchTab(QWidget):
             return
         self._set_busy(True)
         run_async(
-            self.client.search_users,
+            _search_directory,
+            self.client,
             term,
             on_success=self._on_search_succeeded,
             on_failure=lambda message: QMessageBox.critical(self, "Search failed", message),
@@ -188,29 +286,35 @@ class SearchTab(QWidget):
         self.disable_button.setEnabled(not busy)
 
     def _on_search_succeeded(self, result):
-        self._results = result.items
+        users, computers = result
+        self._results = [(USER, user) for user in users.items] + [(COMPUTER, pc) for pc in computers.items]
+        self._empty_message = (
+            "Select a result to view details." if self._results else "No users or computers matched that search."
+        )
         self._populate_table()
-        if result.truncated:
+        if users.truncated or computers.truncated:
             QMessageBox.warning(self, "Results truncated", TRUNCATED_MESSAGE)
 
     def _populate_table(self):
+        self.table.clearSelection()
         self.table.setRowCount(len(self._results))
-        for row, user in enumerate(self._results):
-            values = [
-                user.sam_account_name,
-                user.common_name,
-                user.email,
-                "Yes" if user.is_locked_out else "No",
-                "Yes" if user.disabled else "No",
-                format_dt(user.last_logon),
-            ]
-            for col, value in enumerate(values):
+        for row, (kind, item) in enumerate(self._results):
+            for col, value in enumerate(_result_row(kind, item)):
                 self.table.setItem(row, col, QTableWidgetItem(value))
         self._update_details()
 
-    def _selected_users(self):
+    def _selected(self):
         rows = sorted({index.row() for index in self.table.selectedIndexes()})
         return [self._results[row] for row in rows]
+
+    def _selected_users(self):
+        return [item for kind, item in self._selected() if kind == USER]
+
+    def _show_page(self, page, title="Details", message=None):
+        if message is not None:
+            self.message_label.setText(message)
+        self.details_stack.setCurrentIndex(page)
+        self.details_box.setTitle(title)
 
     def _show_groups_message(self, text):
         self.groups_list.clearSpans()
@@ -221,45 +325,41 @@ class SearchTab(QWidget):
     def _update_details(self):
         # Any group lookup still in flight is now stale; its result is ignored when it lands.
         self._groups_request += 1
-        users = self._selected_users()
-        self.lockout_button.setEnabled(len(users) == 1)
-        if not users:
-            self.details_label.setText("Select an account to view details.")
-            self.groups_list.setRowCount(0)
+        selected = self._selected()
+        users = [item for kind, item in selected if kind == USER]
+        self.actions_row.setVisible(bool(users))
+
+        if not selected:
+            self._show_page(self.PAGE_MESSAGE, message=self._empty_message)
             return
-        if len(users) > 1:
-            self.details_label.setText("Multiple accounts selected. Select one to view details.")
-            self.groups_list.setRowCount(0)
+        if len(selected) > 1:
+            computers = len(selected) - len(users)
+            if not computers:
+                message = "Multiple accounts selected. Select one to view details."
+            elif not users:
+                message = "Multiple computers selected. Select one to view details."
+            else:
+                message = (
+                    f"{len(users)} user(s) and {computers} computer(s) selected. "
+                    "Unlock and Disable apply to the selected users only."
+                )
+            self._show_page(self.PAGE_MESSAGE, message=message)
             return
 
-        user = users[0]
-        lines = [
-            f"{user.common_name} ({user.sam_account_name})",
-            f"UPN: {user.user_principal_name or 'N/A'}",
-            f"Email: {user.email or 'N/A'}",
-            f"Title: {user.title or 'N/A'}",
-            f"Department: {user.department or 'N/A'}",
-            f"Office: {user.office or 'N/A'}",
-            f"Phone: {user.phone or 'N/A'}",
-            f"Manager: {user.manager_name or 'N/A'}",
-            f"Description: {user.description or 'N/A'}",
-            f"Organizational Unit: {user.organizational_unit or 'N/A'}",
-            f"Created: {format_dt(user.when_created, never='Unknown')}",
-            f"Last Modified: {format_dt(user.when_changed, never='Unknown')}",
-            f"Password Last Set: {format_dt(user.password_last_set, never='Never (must change at next logon)')}",
-            f"Account Expires: {format_dt(user.account_expires)}",
-            f"Last Logon (approx., replication delay up to 14 days): {format_dt(user.last_logon)}",
-            f"Locked Out: {'Yes, at ' + format_dt(user.locked_out_at) if user.is_locked_out else 'No'}",
-            f"Disabled: {'Yes' if user.disabled else 'No'}",
-        ]
-        self.details_label.setText("\n".join(lines))
+        kind, item = selected[0]
+        if kind == COMPUTER:
+            self.computer_label.setText("\n".join(_computer_details(item)))
+            self._show_page(self.PAGE_COMPUTER, title="Computer Details")
+            return
 
+        self.details_label.setText("\n".join(_user_details(item)))
+        self._show_page(self.PAGE_USER, title="Account Details")
         self._show_groups_message("Loading groups...")
         request = self._groups_request
         # Resolves nested group membership, not just directly assigned groups.
         run_async(
             self.client.get_effective_groups_with_descriptions,
-            user.distinguished_name,
+            item.distinguished_name,
             on_success=lambda groups: self._fill_groups(request, groups),
             on_failure=lambda message: self._on_groups_failed(request, message),
         )
